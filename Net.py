@@ -254,3 +254,52 @@ class QAMFace(nn.Module):
         # loss = F.cross_entropy((self.pi-2*(theta+0.1))*160,label)
 
         return output, loss
+    
+# https://github.com/xialuxi/CircleLoss_Face/blob/master/CircleLoss.py
+'''
+Circle loss在hidden dim过小，比如为2的时候，收敛性能很差，调到10就很好收敛了，不知道这是不是一个值得研究的方向...
+使用Circle loss需要屏蔽train.py中的visualize部分
+'''
+class SparseCircleLoss(nn.Module):
+    def __init__(self, m: float, emdsize: int ,class_num: int, gamma: float) -> None:
+        super(SparseCircleLoss, self).__init__()
+        self.margin = m
+        self.gamma = gamma
+        self.soft_plus = nn.Softplus()
+        self.class_num = class_num
+        self.emdsize = emdsize
+
+        self.weight = nn.Parameter(torch.FloatTensor(self.class_num, self.emdsize))
+        nn.init.xavier_uniform_(self.weight)
+        self.use_cuda = False
+
+
+    def forward(self, input: Tensor, label: Tensor) -> Tensor:
+        similarity_matrix = nn.functional.linear(nn.functional.normalize(input,p=2, dim=1, eps=1e-12), nn.functional.normalize(self.weight,p=2, dim=1, eps=1e-12))
+        
+        if self.use_cuda:
+            one_hot = torch.zeros(similarity_matrix.size(), device='cuda')
+        else:
+            one_hot = torch.zeros(similarity_matrix.size())
+        one_hot.scatter_(1, label.view(-1, 1).long(), 1)
+        one_hot = one_hot.type(dtype=torch.bool)
+        #sp = torch.gather(similarity_matrix, dim=1, index=label.unsqueeze(1))
+        sp = similarity_matrix[one_hot]
+        mask = one_hot.logical_not()
+        sn = similarity_matrix[mask]
+
+        sp = sp.view(input.size()[0], -1)
+        sn = sn.view(input.size()[0], -1)
+
+        ap = torch.clamp_min(-sp.detach() + 1 + self.margin, min=0.)
+        an = torch.clamp_min(sn.detach() + self.margin, min=0.)
+
+        delta_p = 1 - self.margin
+        delta_n = self.margin
+
+        logit_p = - ap * (sp - delta_p) * self.gamma
+        logit_n = an * (sn - delta_n) * self.gamma
+
+        loss = self.soft_plus(torch.logsumexp(logit_n, dim=1) + torch.logsumexp(logit_p, dim=1))
+
+        return loss.mean()
